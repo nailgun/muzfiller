@@ -2,16 +2,30 @@
 
 import pygtk
 pygtk.require('2.0')
-import gtk, os, gio, threading, shutil, glob, socket, sys, gobject
+import gtk, os, gio, threading, shutil, glob, socket, sys, gobject, errno
 
 class AlreadyRunning(RuntimeError):
+	pass
+
+class SocketError(RuntimeError):
 	pass
 
 class Client:
 	def __init__(self, socket_file):
 		self.socket_file = socket_file
 	def check_exists(self):
-		return os.path.exists(self.socket_file)
+		if os.path.exists(self.socket_file):
+			s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+			try:
+				s.connect(self.socket_file)
+				s.close()
+			except socket.error, (no, strerr):
+				if no == errno.ECONNREFUSED:
+					raise SocketError()
+			return True
+		else:
+			return False
+
 	def send_files(self, files):
 		s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 		s.connect(self.socket_file)
@@ -96,7 +110,10 @@ class CopyThread(threading.Thread):
 			if self.need_stop:
 				break
 
-			iter = self.muzstore.get_iter(self.current_file)
+			try:
+				iter = self.muzstore.get_iter(self.current_file)
+			except ValueError:
+				iter = None
 			while iter:
 				if self.need_stop:
 					break
@@ -218,7 +235,12 @@ class MuzFiller:
 		home_path = os.path.expanduser('~')
 		self.socket_file = os.path.join(home_path, self.SOCKET_NAME)
 
-		redirect = Client(self.socket_file).check_exists()
+		try:
+			redirect = Client(self.socket_file).check_exists()
+		except SocketError:
+			redirect = False
+			os.remove(self.socket_file)
+
 		if not redirect:
 			self.copy_thread = CopyThread()
 
