@@ -65,11 +65,12 @@ class SocketThread(threading.Thread, gobject.GObject):
 		os.remove(self.socket_file)
 
 
-class CopyThread(threading.Thread):
+class CopyThread(threading.Thread, gobject.GObject):
 	TARGET_DIR = '/home/nailgun/tmp'
 	COUNTER_END = 999999 
 
 	def __init__(self):
+		gobject.GObject.__init__(self)
 		threading.Thread.__init__(self)
 		self.new_files_event = threading.Event()
 		self.current_file = 0
@@ -77,6 +78,9 @@ class CopyThread(threading.Thread):
 		# store format:
 		# basename, src_path, dest_basename, dest_path
 		self.muzstore = gtk.ListStore(str, str, str, str)
+		self.copying = False
+		gobject.signal_new('start_copy', CopyThread,
+				gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, ())
 
 	def new_files_added(self):
 		self.new_files_event.set()
@@ -103,29 +107,29 @@ class CopyThread(threading.Thread):
 
 	def run(self):
 		self.need_stop = False
-
 		while not self.need_stop:
 			self.new_files_event.wait()
 			self.new_files_event.clear()
 			if self.need_stop:
 				break
-
 			try:
 				iter = self.muzstore.get_iter(self.current_file)
 			except ValueError:
 				iter = None
+			self.copying = True
+			self.emit('start_copy')
 			while iter:
 				if self.need_stop:
 					break
-
 				src_path = self.muzstore.get_value(iter, 1)
 				dest_basename = self.gen_filename(os.path.splitext(src_path)[1])
 				dest_path = os.path.join(self.TARGET_DIR, dest_basename)
-				shutil.copy(src_path, dest_path)
 				self.muzstore.set(iter, 2, dest_basename, 3, dest_path)
+				shutil.copy(src_path, dest_path)
 				self.current_file += 1
 				self.counter_end -= 1
 				iter = self.muzstore.iter_next(iter)
+			self.copying = False
 
 class MuzFiller:
 	TARGET_TYPE_TEXT = 1
@@ -229,6 +233,34 @@ class MuzFiller:
 	def handle_received(self, thread, uris):
 		self.add_uris(uris)
 
+	def handle_start_copy(self, thread):
+		gobject.idle_add(self.update_progress)
+
+	def update_progress(self):
+		cur = self.copy_thread.current_file
+		try:
+			iter = self.copy_thread.muzstore.get_iter(cur)
+		except ValueError:
+			self.progress.set_fraction(0)
+			return
+
+		# TODO: write total size in store (optimize)
+		src_path, dest_path = self.copy_thread.muzstore.get(iter, 1, 3)
+		total = os.path.getsize(src_path)
+		try:
+			size = os.path.getsize(dest_path)
+		except OSError, err:
+			if err[0] == errno.ENOENT:
+				size = 0
+			else:
+				raise err
+		self.progress.set_fraction(size / float(total))
+
+		if self.copy_thread.copying:
+			gobject.idle_add(self.update_progress)
+		else:
+			self.progress.set_fraction(0)
+
 	def __init__(self):
 		gtk.gdk.threads_init()
 
@@ -249,7 +281,8 @@ class MuzFiller:
 			raise AlreadyRunning()
 
 		self.socket_thread = SocketThread(self.socket_file)
-		self.socket_thread.connect("files_received", self.handle_received)
+		self.socket_thread.connect('files_received', self.handle_received)
+		self.copy_thread.connect('start_copy', self.handle_start_copy)
 
 		self.setup_ui()
 		self.copy_thread.start()
