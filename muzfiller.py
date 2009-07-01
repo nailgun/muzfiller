@@ -2,8 +2,54 @@
 
 import pygtk
 pygtk.require('2.0')
-import gtk, os, gio, threading, shutil, glob
-gtk.gdk.threads_init()
+import gtk, os, gio, threading, shutil, glob, socket, sys, gobject
+
+class AlreadyRunning(RuntimeError):
+	pass
+
+class Client:
+	def __init__(self, socket_file):
+		self.socket_file = socket_file
+	def check_exists(self):
+		return os.path.exists(self.socket_file)
+	def send_files(self, files):
+		s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+		s.connect(self.socket_file)
+		for file in files:
+			s.send(file + '\n')
+		s.close()
+
+class SocketThread(threading.Thread, gobject.GObject):
+	def __init__(self, socket_file):
+		gobject.GObject.__init__(self)
+		threading.Thread.__init__(self)
+		self.socket_file = socket_file
+		gobject.signal_new('files_received', SocketThread,
+				gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, (object, ))
+
+	def stop(self):
+		self.need_stop = True
+		Client(self.socket_file).send_files([])
+		self.join()
+
+	def run(self):
+		self.need_stop = False
+		s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+		s.bind(self.socket_file)
+		s.listen(1)
+		while not self.need_stop:
+			c = s.accept()[0]
+			buf = c.recv(1024)
+			data = ''
+			while buf:
+				data += buf
+				buf = c.recv(1024)
+			c.close()
+			files = data.split()
+			if len(files):
+				self.emit("files_received", files)
+		os.remove(self.socket_file)
+
 
 class CopyThread(threading.Thread):
 	TARGET_DIR = '/home/nailgun/tmp'
@@ -14,6 +60,9 @@ class CopyThread(threading.Thread):
 		self.new_files_event = threading.Event()
 		self.current_file = 0
 		self.counter_end = self.COUNTER_END
+		# store format:
+		# basename, src_path, dest_basename, dest_path
+		self.muzstore = gtk.ListStore(str, str, str, str)
 
 	def new_files_added(self):
 		self.new_files_event.set()
@@ -64,31 +113,43 @@ class CopyThread(threading.Thread):
 class MuzFiller:
 	TARGET_TYPE_TEXT = 1
 	LIST_ACCEPT = [('text/plain', 0, TARGET_TYPE_TEXT)]
+	SOCKET_NAME = '.muzfiller.sock'
 
 	def destroy(self, widget, data=None):
 		# TODO: message: copy in progress, please wait
-		self.thread.stop()
+		self.socket_thread.stop()
+		self.copy_thread.stop()
 		gtk.main_quit()
 
-	def add_files(self, uri_list):
+	def add_names(self, name_list):
+		for src_name in name_list:
+			src = gio.File(src_name)
+			basename = src.get_basename()
+			src_path = src.get_path()
+			self.copy_thread.muzstore.append([basename, src_path, None, None])
+		if len(name_list):
+			self.copy_thread.new_files_added()
+
+	def add_uris(self, uri_list):
 		for src_uri in uri_list:
 			src = gio.File(uri=src_uri)
 			basename = src.get_basename()
 			src_path = src.get_path()
-			self.thread.muzstore.append([basename, src_path, None, None])
-		self.thread.new_files_added()
+			self.copy_thread.muzstore.append([basename, src_path, None, None])
+		if len(uri_list):
+			self.copy_thread.new_files_added()
 
 	def file_drop(self, widget, context, x, y, selection, target, time):
 		if target == self.TARGET_TYPE_TEXT:
-			self.add_files(selection.data.split())
+			self.add_uris(selection.data.split())
 
 	def show_info(self, treeview):
 		cursor = treeview.get_cursor()
 		if not cursor:
 			self.info.set_text('click file to get info')
 		else:
-			it = self.thread.muzstore.get_iter(cursor[0])
-			src_path = self.thread.muzstore.get_value(it, 1)
+			it = self.copy_thread.muzstore.get_iter(cursor[0])
+			src_path = self.copy_thread.muzstore.get_value(it, 1)
 			self.info.set_text(src_path)
 
 	def setup_ui(self):
@@ -96,10 +157,7 @@ class MuzFiller:
 		self.window.set_title("MuzFiller")
 		self.window.set_border_width(8);
 
-		# store format:
-		# basename, src_path, dest_basename, dest_path
-		self.thread.muzstore = gtk.ListStore(str, str, str, str)
-		self.listview = gtk.TreeView(self.thread.muzstore)
+		self.listview = gtk.TreeView(self.copy_thread.muzstore)
 
 		cell_file = gtk.CellRendererText()
 		col_file = gtk.TreeViewColumn('Filename', cell_file)
@@ -137,16 +195,51 @@ class MuzFiller:
 		self.window.connect("destroy", self.destroy)
 
 		self.window.set_default_size(300, 200)
-		self.window.show_all()
+
+	def parse_args(self, redirect):
+		if redirect:
+			c = Client(self.socket_file)
+			paths = []
+			for name in sys.argv[1:]:
+				f = gio.File(name)
+				paths.append(f.get_uri())
+			if len(paths):
+				c.send_files(paths)
+		else:
+			if len(sys.argv) > 1:
+				self.add_names(sys.argv[1:])
+
+	def handle_received(self, thread, uris):
+		self.add_uris(uris)
 
 	def __init__(self):
-		self.thread = CopyThread()
+		gtk.gdk.threads_init()
+
+		home_path = os.path.expanduser('~')
+		self.socket_file = os.path.join(home_path, self.SOCKET_NAME)
+
+		redirect = Client(self.socket_file).check_exists()
+		if not redirect:
+			self.copy_thread = CopyThread()
+
+		self.parse_args(redirect)
+		if redirect:
+			raise AlreadyRunning()
+
+		self.socket_thread = SocketThread(self.socket_file)
+		self.socket_thread.connect("files_received", self.handle_received)
+
 		self.setup_ui()
-		self.thread.start()
+		self.copy_thread.start()
+		self.socket_thread.start()
 
 	def main(self):
+		self.window.show_all()
 		gtk.main()
 
 if __name__ == "__main__":
-	app = MuzFiller()
-	app.main()
+	try:
+		app = MuzFiller()
+		app.main()
+	except AlreadyRunning:
+		pass
