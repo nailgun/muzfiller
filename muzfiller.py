@@ -84,7 +84,6 @@ class CopyThread(threading.Thread, gobject.GObject):
 		self.counter_end = self.COUNTER_END
 		# store format:
 		# basename, src_path, dest_basename, dest_path, icon
-		#self.muzstore = gtk.ListStore(str, str, str, str, gtk.gdk.Pixbuf)
 		self.muzstore = gtk.ListStore(str, str, str, str, str)
 		self.copying = False
 		gobject.signal_new('start_copy', CopyThread,
@@ -134,8 +133,12 @@ class CopyThread(threading.Thread, gobject.GObject):
 				dest_path = os.path.join(self.TARGET_DIR, dest_basename)
 				self.muzstore.set(iter, COL_DEST_BASENAME, dest_basename,
 						COL_DEST_PATH, dest_path, COL_ICON, gtk.STOCK_GO_FORWARD)
-				shutil.copy(src_path, dest_path)
-				self.muzstore.set(iter, COL_ICON, gtk.STOCK_APPLY)
+				try:
+					shutil.copy(src_path, dest_path)
+					self.muzstore.set(iter, COL_ICON, gtk.STOCK_APPLY)
+				except IOError:
+					self.muzstore.set(iter, COL_ICON, gtk.STOCK_CANCEL)
+
 				self.current_file += 1
 				self.counter_end -= 1
 				iter = self.muzstore.iter_next(iter)
@@ -229,7 +232,7 @@ class MuzFiller:
 		self.listview.connect('cursor_changed', self.show_info)
 		self.window.connect("destroy", self.destroy)
 
-		self.window.set_default_size(300, 200)
+		self.window.set_default_size(400, 300)
 
 	def parse_args(self, redirect):
 		if redirect:
@@ -259,12 +262,13 @@ class MuzFiller:
 			return
 
 		# TODO: write total size in store (optimize)
-		src_path, dest_path = self.copy_thread.muzstore.get(iter, 1, 3)
-		total = os.path.getsize(src_path)
+		src_path, dest_path = self.copy_thread.muzstore.get(iter, COL_SRC_PATH, COL_DEST_PATH)
 		try:
+			total = os.path.getsize(src_path)
 			size = os.path.getsize(dest_path)
 		except OSError, err:
 			if err[0] == errno.ENOENT:
+				total = 1
 				size = 0
 			else:
 				raise err
