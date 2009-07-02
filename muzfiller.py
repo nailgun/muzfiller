@@ -4,6 +4,13 @@ import pygtk
 pygtk.require('2.0')
 import gtk, os, gio, threading, shutil, glob, socket, sys, gobject, errno
 
+# basename, src_path, dest_basename, dest_path
+COL_SRC_BASENAME = 0
+COL_SRC_PATH = 1
+COL_DEST_BASENAME = 2
+COL_DEST_PATH = 3
+COL_ICON = 4
+
 class AlreadyRunning(RuntimeError):
 	pass
 
@@ -76,8 +83,9 @@ class CopyThread(threading.Thread, gobject.GObject):
 		self.current_file = 0
 		self.counter_end = self.COUNTER_END
 		# store format:
-		# basename, src_path, dest_basename, dest_path
-		self.muzstore = gtk.ListStore(str, str, str, str)
+		# basename, src_path, dest_basename, dest_path, icon
+		#self.muzstore = gtk.ListStore(str, str, str, str, gtk.gdk.Pixbuf)
+		self.muzstore = gtk.ListStore(str, str, str, str, str)
 		self.copying = False
 		gobject.signal_new('start_copy', CopyThread,
 				gobject.SIGNAL_RUN_FIRST, gobject.TYPE_NONE, ())
@@ -121,11 +129,13 @@ class CopyThread(threading.Thread, gobject.GObject):
 			while iter:
 				if self.need_stop:
 					break
-				src_path = self.muzstore.get_value(iter, 1)
+				src_path = self.muzstore.get_value(iter, COL_SRC_PATH)
 				dest_basename = self.gen_filename(os.path.splitext(src_path)[1])
 				dest_path = os.path.join(self.TARGET_DIR, dest_basename)
-				self.muzstore.set(iter, 2, dest_basename, 3, dest_path)
+				self.muzstore.set(iter, COL_DEST_BASENAME, dest_basename,
+						COL_DEST_PATH, dest_path, COL_ICON, gtk.STOCK_GO_FORWARD)
 				shutil.copy(src_path, dest_path)
+				self.muzstore.set(iter, COL_ICON, gtk.STOCK_APPLY)
 				self.current_file += 1
 				self.counter_end -= 1
 				iter = self.muzstore.iter_next(iter)
@@ -147,7 +157,7 @@ class MuzFiller:
 			src = gio.File(src_name)
 			basename = src.get_basename()
 			src_path = src.get_path()
-			self.copy_thread.muzstore.append([basename, src_path, None, None])
+			self.copy_thread.muzstore.append([basename, src_path, None, None, gtk.STOCK_FILE])
 		if len(name_list):
 			self.copy_thread.new_files_added()
 
@@ -156,7 +166,7 @@ class MuzFiller:
 			src = gio.File(uri=src_uri)
 			basename = src.get_basename()
 			src_path = src.get_path()
-			self.copy_thread.muzstore.append([basename, src_path, None, None])
+			self.copy_thread.muzstore.append([basename, src_path, None, None, gtk.STOCK_FILE])
 		if len(uri_list):
 			self.copy_thread.new_files_added()
 
@@ -181,18 +191,22 @@ class MuzFiller:
 		self.listview = gtk.TreeView(self.copy_thread.muzstore)
 
 		cell_file = gtk.CellRendererText()
-		col_file = gtk.TreeViewColumn('Filename', cell_file)
-		col_file.add_attribute(cell_file, 'text', 0)
-		col_file.set_sort_column_id(0)
+		cell_icon = gtk.CellRendererPixbuf()
+		col_file = gtk.TreeViewColumn('Filename')
+		col_file.pack_start(cell_icon)
+		col_file.pack_start(cell_file)
+		col_file.add_attribute(cell_file, 'text', COL_SRC_BASENAME)
+		col_file.add_attribute(cell_icon, 'stock-id', COL_ICON)
+		col_file.set_sort_column_id(COL_SRC_BASENAME)
 
 		cell_dest = gtk.CellRendererText()
 		col_dest = gtk.TreeViewColumn('New filename', cell_dest)
-		col_dest.add_attribute(cell_dest, 'text', 2)
-		col_dest.set_sort_column_id(2)
+		col_dest.add_attribute(cell_dest, 'text', COL_DEST_BASENAME)
+		col_dest.set_sort_column_id(COL_DEST_BASENAME)
 
 		self.listview.append_column(col_file)
 		self.listview.append_column(col_dest)
-		self.listview.set_search_column(0)
+		self.listview.set_search_column(COL_SRC_BASENAME)
 
 		scrolled = gtk.ScrolledWindow()
 		scrolled.set_shadow_type(gtk.SHADOW_ETCHED_IN)
